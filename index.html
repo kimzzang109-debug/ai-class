@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>📱 스마트폰 AI 이미지 분류기</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- TensorFlow.js 및 MobileNet, KNN Classifier CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/knn-classifier"></script>
+</head>
+<body class="bg-gray-50 text-gray-800 min-h-screen p-4">
+
+    <div class="max-w-md mx-auto bg-white rounded-2xl shadow-lg p-5 mb-10">
+        <h1 class="text-xl font-bold text-center text-indigo-600 mb-1">📱 스마트폰 AI 이미지 분류기</h1>
+        <p class="text-xs text-center text-gray-500 mb-4">사진은 서버에 저장되지 않고 폰 메모리에서만 처리됩니다.</p>
+
+        <!-- 웹캠 및 미리보기 영역 -->
+        <div class="relative bg-black rounded-xl overflow-hidden aspect-video mb-4 flex items-center justify-center">
+            <video id="webcam" autoplay playsinline muted class="w-full h-full object-cover"></video>
+            <canvas id="canvas" class="hidden"></canvas>
+            <div id="status-badge" class="absolute bottom-2 left-2 bg-black/60 text-white text-xs px-2 py-1 rounded-md">
+                모델 로딩 중...
+            </div>
+        </div>
+
+        <!-- 실시간 예측 결과 -->
+        <div class="bg-indigo-50 border border-indigo-100 rounded-xl p-3 mb-4 text-center">
+            <div class="text-xs text-indigo-500 font-semibold">AI 예측 결과</div>
+            <div id="result-text" class="text-lg font-bold text-indigo-700">대기 중...</div>
+        </div>
+
+        <!-- 클래스 추가 버튼 -->
+        <div class="flex gap-2 mb-4">
+            <input type="text" id="new-class-name" placeholder="새 클래스 이름 (예: 사과)" class="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500">
+            <button onclick="addClass()" class="bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold px-4 py-2 rounded-lg transition">클래스 추가</button>
+        </div>
+
+        <!-- 클래스 리스트 영역 -->
+        <div id="classes-container" class="space-y-3 mb-6">
+            <!-- 동적으로 클래스 카드가 생성됩니다 -->
+        </div>
+
+        <!-- 전체 초기화 및 학습 제어 -->
+        <div class="border-t pt-4 flex gap-2">
+            <button onclick="startPredicting()" id="predict-btn" class="flex-1 bg-green-600 hover:bg-green-700 text-white text-sm font-semibold py-2.5 rounded-lg transition disabled:opacity-50" disabled>AI 예측 시작</button>
+            <button onclick="resetAll()" class="bg-gray-200 hover:bg-gray-300 text-gray-700 text-sm font-semibold px-4 py-2.5 rounded-lg transition">전체 초기화</button>
+        </div>
+    </div>
+
+    <!-- 숨겨진 파일 업로드 input -->
+    <input type="file" id="file-input" accept="image/*" class="hidden" onchange="handleFileUpload(event)">
+
+    <script>
+        let net;
+        let classifier;
+        let webcamElement = document.getElementById('webcam');
+        let classifierClasses = {}; // 클래스별 데이터 수 관리
+        let isPredicting = false;
+        let activeClassForUpload = null;
+        let webcamStream = null;
+
+        async function init() {
+            document.getElementById('status-badge').innerText = "AI 모델 로딩 중...";
+            classifier = knnClassifier.create();
+            net = await mobilenet.load();
+            document.getElementById('status-badge').innerText = "준비 완료 (카메라 켜짐)";
+            
+            setupWebcam();
+            // 기본 클래스 2개 생성
+            addNewClassToUI("클래스 1");
+            addNewClassToUI("클래스 2");
+        }
+
+        // 웹캠 연결
+        async function setupWebcam() {
+            try {
+                webcamStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+                webcamElement.srcObject = webcamStream;
+            } catch (err) {
+                alert("카메라 권한이 필요합니다.");
+            }
+        }
+
+        // 클래스 UI 추가 함수
+        function addNewClassToUI(className) {
+            const container = document.getElementById('classes-container');
+            const classId = 'class-' + Date.now() + Math.random().toString(36).substring(2, 5);
+            
+            classifierClasses[classId] = { name: className, count: 0 };
+
+            const card = document.createElement('div');
+            card.id = classId;
+            card.className = "bg-gray-50 border border-gray-200 rounded-xl p-3 flex flex-col gap-2";
+            card.innerHTML = `
+                <div class="flex justify-between items-center">
+                    <span class="font-bold text-sm text-gray-700 class-title">${className}</span>
+                    <div class="flex items-center gap-2">
+                        <span class="text-xs bg-gray-200 px-2 py-0.5 rounded-full text-gray-600 count-badge">데이터: 0개</span>
+                        <button onclick="removeClass('${classId}')" class="text-red-500 hover:text-red-700 text-xs font-semibold">삭제</button>
+                    </div>
+                </div>
+                <div class="flex gap-2">
+                    <button onclick="captureImage('${classId}')" class="flex-1 bg-blue-500 hover:bg-blue-600 text-white text-xs py-1.5 rounded-md transition">📷 사진 촬영 학습</button>
+                    <button onclick="triggerFileUpload('${classId}')" class="flex-1 bg-amber-500 hover:bg-amber-600 text-white text-xs py-1.5 rounded-md transition">📁 사진 업로드 학습</button>
+                </div>
+            `;
+            container.appendChild(card);
+            checkPredictReady();
+        }
+
+        function addClass() {
+            const input = document.getElementById('new-class-name');
+            const name = input.value.trim();
+            if (!name) {
+                alert("클래스 이름을 입력해주세요.");
+                return;
+            }
+            addNewClassToUI(name);
+            input.value = '';
+        }
+
+        function removeClass(classId) {
+            delete classifierClasses[classId];
+            document.getElementById(classId).remove();
+            checkPredictReady();
+        }
+
+        // 1. 카메라로 현재 화면 캡처하여 학습 (메모리상 임베딩 추출)
+        async function captureImage(classId) {
+            const activation = net.infer(webcamElement, true);
+            classifier.addExample(activation, classifierClasses[classId].name);
+            activation.dispose(); // 메모리 즉시 해제 (메모리 누수 방지)
+
+            classifierClasses[classId].count++;
+            updateCountBadge(classId);
+            checkPredictReady();
+        }
+
+        // 2. 스마트폰 갤러리 사진 업로드하여 학습
+        function triggerFileUpload(classId) {
+            activeClassForUpload = classId;
+            document.getElementById('file-input').click();
+        }
+
+        async function handleFileUpload(event) {
+            const file = event.target.files[0];
+            if (!file || !activeClassForUpload) return;
+
+            const img = document.createElement('img');
+            img.src = URL.createObjectURL(file);
+            
+            img.onload = async () => {
+                const activation = net.infer(img, true);
+                classifier.addExample(activation, classifierClasses[activeClassForUpload].name);
+                activation.dispose();
+
+                classifierClasses[activeClassForUpload].count++;
+                updateCountBadge(activeClassForUpload);
+                checkPredictReady();
+                
+                // 객체 URL 해제 (메모리 관리 및 프라이버시)
+                URL.revokeObjectURL(img.src);
+                event.target.value = ''; // 초기화
+            };
+        }
+
+        function updateCountBadge(classId) {
+            const card = document.getElementById(classId);
+            if (card) {
+                card.querySelector('.count-badge').innerText = `데이터: ${classifierClasses[classId].count}개`;
+            }
+        }
+
+        function checkPredictReady() {
+            const totalClasses = Object.keys(classifierClasses).length;
+            const hasData = Object.values(classifierClasses).some(c => c.count > 0);
+            const btn = document.getElementById('predict-btn');
+            if (totalClasses >= 2 && hasData) {
+                btn.removeAttribute('disabled');
+            } else {
+                btn.setAttribute('disabled', 'true');
+            }
+        }
+
+        // 실시간 추론 루프
+        async function startPredicting() {
+            if (isPredicting) return;
+            if (classifier.getNumClasses() < 2) {
+                alert("최소 2개 이상의 클래스에 데이터가 학습되어야 합니다.");
+                return;
+            }
+            isPredicting = true;
+            document.getElementById('predict-btn').innerText = "예측 중지";
+            document.getElementById('predict-btn').className = "flex-1 bg-red-600 hover:bg-red-700 text-white text-sm font-semibold py-2.5 rounded-lg transition";
+            document.getElementById('predict-btn').setAttribute('onclick', 'stopPredicting()');
+
+            predictLoop();
+        }
+
+        function stopPredicting() {
+            isPredicting = false;
+            document.getElementById('predict-btn').innerText = "AI 예측 시작";
+            document.getElementById('predict-btn').className = "flex-1 bg-green-600 hover:bg-green-700 text-white text-sm font-semibold py-2.5 rounded-lg transition";
+            document.getElementById('predict-btn').setAttribute('onclick', 'startPredicting()');
+            document.getElementById('result-text').innerText = "대기 중...";
+        }
+
+        async function predictLoop() {
+            if (!isPredicting) return;
+
+            if (classifier.getNumClasses() > 0) {
+                const activation = net.infer(webcamElement, true);
+                const result = await classifier.predictClass(activation);
+                activation.dispose();
+
+                document.getElementById('result-text').innerText = `${result.label} (${Math.round(result.confidences[result.label] * 100)}%)`;
+            }
+            await tf.nextFrame();
+            if (isPredicting) {
+                predictLoop();
+            }
+        }
+
+        function resetAll() {
+            stopPredicting();
+            classifier.clearAllClasses();
+            document.getElementById('classes-container').innerHTML = '';
+            classifierClasses = {};
+            addNewClassToUI("클래스 1");
+            addNewClassToUI("클래스 2");
+        }
+
+        window.onload = init;
+    </script>
+</body>
+</html>
